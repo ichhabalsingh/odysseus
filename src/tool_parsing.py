@@ -197,7 +197,7 @@ _QWEN_BARE_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 _QWEN_TOOL_CALL_RE = re.compile(
-    r"<\|tool_call_start\|>\[(\w+)\(([\s\S]*?)\)\](?:<\|tool_call_end\|>)?",
+    r"<\|tool_call_start\|>\[(\w+)\(([\s\S]*?)\)\](?:\s*<\|tool_call_end\|>)?",
     re.IGNORECASE
 )
 
@@ -1158,6 +1158,35 @@ def _parse_gemma_tool_call(tool_name: str, body: str) -> Optional[ToolBlock]:
     return function_call_to_tool_block(tool_name, json.dumps(params))
 
 
+_BUILTIN_POSITIONAL_ARGS = {
+    "bash": ["command"],
+    "python": ["code"],
+    "web_search": ["query", "time_filter"],
+    "web_fetch": ["url", "full"],
+    "read_file": ["path", "offset", "limit"],
+    "write_file": ["path", "content"],
+    "edit_file": ["path", "old_string", "new_string", "replace_all"],
+    "grep": ["pattern", "path", "glob", "ignore_case", "max_results"],
+    "glob": ["pattern", "path"],
+    "ls": ["path"],
+    "create_document": ["title", "language", "content"],
+}
+
+_BUILTIN_PRIMARY_ARG = {
+    "bash": "command",
+    "python": "code",
+    "web_search": "query",
+    "web_fetch": "url",
+    "read_file": "path",
+    "write_file": "path",
+    "edit_file": "path",
+    "grep": "pattern",
+    "glob": "pattern",
+    "ls": "path",
+    "create_document": "title",
+}
+
+
 def _parse_qwen_tool_call(tool_name: str, args_str: str) -> Optional[ToolBlock]:
     """Parse a Qwen-style call: <|tool_call_start|>[tool_name(args_str)]<|tool_call_end|>."""
     tool_name = tool_name.strip().lower().replace("-", "_")
@@ -1174,6 +1203,16 @@ def _parse_qwen_tool_call(tool_name: str, args_str: str) -> Optional[ToolBlock]:
                     call_node = node
                     break
             if call_node:
+                # Map positional arguments if we know the tool's signature
+                pos_names = _BUILTIN_POSITIONAL_ARGS.get(tool_name)
+                if pos_names:
+                    for idx, arg_val in enumerate(call_node.args):
+                        if idx < len(pos_names):
+                            try:
+                                params[pos_names[idx]] = ast.literal_eval(arg_val)
+                            except Exception:
+                                pass
+                # Map keyword arguments
                 for kw in call_node.keywords:
                     try:
                         params[kw.arg] = ast.literal_eval(kw.value)
@@ -1181,9 +1220,10 @@ def _parse_qwen_tool_call(tool_name: str, args_str: str) -> Optional[ToolBlock]:
                         pass
         except Exception:
             params = {}
-            for m in re.finditer(r"(\w+)\s*=\s*(?:['\"]([^'\"]*)['\"]|([\w.]+))", args_str):
+            # Fallback 1: regex key-value extraction that handles spaces and quotes
+            for m in re.finditer(r"(\w+)\s*=\s*['\"]?(.*?)['\"]?(?=\s*,\s*\w+\s*=|\s*$)", args_str):
                 k = m.group(1)
-                v = m.group(2) if m.group(2) is not None else m.group(3)
+                v = m.group(2).strip()
                 if v == "True":
                     v = True
                 elif v == "False":
@@ -1199,6 +1239,15 @@ def _parse_qwen_tool_call(tool_name: str, args_str: str) -> Optional[ToolBlock]:
                     except ValueError:
                         pass
                 params[k] = v
+
+            # Fallback 2: single argument fallback if no key-value pairs matched
+            if not params:
+                primary_arg = _BUILTIN_PRIMARY_ARG.get(tool_name)
+                if primary_arg:
+                    val = args_str.strip()
+                    if len(val) >= 2 and ((val[0] == '"' and val[-1] == '"') or (val[0] == "'" and val[-1] == "'")):
+                        val = val[1:-1]
+                    params[primary_arg] = val
 
     from src.tool_schemas import function_call_to_tool_block
     return function_call_to_tool_block(tool_name, json.dumps(params))

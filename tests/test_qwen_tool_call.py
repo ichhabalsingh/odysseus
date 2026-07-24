@@ -27,3 +27,49 @@ def test_qwen_tool_call_with_args():
     
     cleaned = strip_tool_blocks(raw, skip_fenced=True)
     assert cleaned == "Okay, fetching recent messages."
+
+
+def test_qwen_tool_call_positional_args():
+    # Single positional argument
+    raw = '<|tool_call_start|>[web_search("Sweden news")]<|tool_call_end|>'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "web_search"
+    assert "Sweden news" in blocks[0].content
+
+    # Multiple positional arguments
+    raw = '<|tool_call_start|>[read_file("src/main.py", 10, 50)]<|tool_call_end|>'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "read_file"
+    assert "src/main.py" in blocks[0].content
+    assert "10" in blocks[0].content
+    assert "50" in blocks[0].content
+
+
+def test_qwen_tool_call_whitespace_before_end_tag():
+    raw = "Okay.\n<|tool_call_start|>[web_search(query=\"Sweden news\")]\n<|tool_call_end|>"
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "web_search"
+    
+    cleaned = strip_tool_blocks(raw, skip_fenced=True)
+    assert cleaned == "Okay."
+
+
+def test_qwen_tool_call_regex_fallback_and_single_arg():
+    # Regex fallback with unquoted values containing spaces
+    raw = '<|tool_call_start|>[web_search(query=Sweden news today, time_filter=day)]<|tool_call_end|>'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "web_search"
+    assert "Sweden news today" in blocks[0].content
+    assert "day" in blocks[0].content
+
+    # Single argument fallback (syntax error, no keyword)
+    raw = '<|tool_call_start|>[web_search(Sweden news today)]<|tool_call_end|>'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "web_search"
+    assert "Sweden news today" in blocks[0].content
+
