@@ -73,3 +73,65 @@ def test_qwen_tool_call_regex_fallback_and_single_arg():
     assert blocks[0].tool_type == "web_search"
     assert "Sweden news today" in blocks[0].content
 
+
+def test_qwen_argument_validation():
+    # list-valued command in bash
+    raw = '<|tool_call_start|>[bash(command=["ls", "-la"])]<|tool_call_end|>'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 0
+
+    # set-valued query in web_search
+    raw = '<|tool_call_start|>[web_search(query={"Sweden news"})]<|tool_call_end|>'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 0
+
+    # non-string path/content in write_file
+    raw = '<|tool_call_start|>[write_file(path=123, content=["foo"])]<|tool_call_end|>'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 0
+
+
+def test_qwen_positional_canonicalization():
+    # Alias shell maps to bash, and its positional argument maps to command
+    raw = '<|tool_call_start|>[shell("pwd")]<|tool_call_end|>'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "bash"
+    assert blocks[0].content == "pwd"
+
+
+def test_qwen_email_fail_closed():
+    # Positional list_emails call should fail closed (return None/no blocks)
+    raw = '<|tool_call_start|>[list_emails("work")]<|tool_call_end|>'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 0
+
+    # Keyword list_emails call should parse successfully
+    raw = '<|tool_call_start|>[list_emails(account="work")]<|tool_call_end|>'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "mcp__email__list_emails"
+    assert "work" in blocks[0].content
+
+
+def test_qwen_delimiter_parsing():
+    # )] sequence inside quotes should be treated as data
+    raw = '<|tool_call_start|>[web_search(query="a )] b")]<|tool_call_end|>'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "web_search"
+    assert "a )] b" in blocks[0].content
+
+    # Should also strip correctly
+    cleaned = strip_tool_blocks(raw, skip_fenced=True)
+    assert cleaned == ""
+
+
+def test_qwen_parser_robustness_incomplete_wrapper():
+    # Incomplete wrapper (no closing tag) should not execute or strip
+    raw = 'before <|tool_call_start|>[bash("id")] after'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 0
+
+    cleaned = strip_tool_blocks(raw, skip_fenced=True)
+    assert cleaned == 'before <|tool_call_start|>[bash("id")] after'
