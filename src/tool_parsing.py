@@ -1390,7 +1390,9 @@ def _parse_qwen_tool_call(tool_name: str, args_str: str) -> Optional[ToolBlock]:
                     try:
                         params[kw.arg] = ast.literal_eval(kw.value)
                     except Exception:
-                        pass
+                        if is_email_tool:
+                            logger.warning(f"Failed to evaluate keyword argument {kw.arg} for email tool {tool_name}")
+                            return None
         except Exception:
             # If parsing failed and it's an email tool, fail closed
             if is_email_tool:

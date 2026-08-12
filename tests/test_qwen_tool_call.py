@@ -135,3 +135,10 @@ def test_qwen_parser_robustness_incomplete_wrapper():
 
     cleaned = strip_tool_blocks(raw, skip_fenced=True)
     assert cleaned == 'before <|tool_call_start|>[bash("id")] after'
+
+
+def test_qwen_email_malformed_keyword_fail_closed():
+    # If key-value evaluation fails for email tools, it should fail closed (return no blocks)
+    raw = '<|tool_call_start|>[list_emails(account=work)]<|tool_call_end|>'
+    blocks = parse_tool_blocks(raw, skip_fenced=True)
+    assert len(blocks) == 0
