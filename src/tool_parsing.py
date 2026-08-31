@@ -197,6 +197,10 @@ _QWEN_BARE_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+_QWEN_KV_RE = re.compile(
+    r"""(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^,]+))"""
+)
+
 
 # Pattern 5: DeepSeek DSML markup leaking into content. When deepseek
 # models can't emit structured tool_calls (e.g. we sent no tool schemas
@@ -1208,6 +1212,19 @@ def _scan_qwen_args(text: str, start_pos: int) -> Optional[Tuple[str, int]]:
                 quote_char = None
         else:
             if char in ('"', "'"):
+                # Detect triple-quoted strings
+                if pos + 2 < n and text[pos + 1] == char and text[pos + 2] == char:
+                    triple = char
+                    pos += 3
+                    while pos < n:
+                        if text[pos] == '\\':
+                            pos += 2
+                            continue
+                        if text[pos:pos + 3] == triple:
+                            pos += 3
+                            break
+                        pos += 1
+                    continue
                 quote_char = char
                 escaped = False
             elif char == '(':
@@ -1319,6 +1336,11 @@ def _validate_tool_arguments(name: str, args: dict) -> bool:
 
     parameters = schema.get("parameters", {})
     properties = parameters.get("properties", {})
+    required = parameters.get("required", [])
+
+    for req in required:
+        if req not in args:
+            return False
 
     for arg_name, arg_val in args.items():
         if arg_name not in properties:
@@ -1362,7 +1384,6 @@ def _parse_qwen_tool_call(tool_name: str, args_str: str) -> Optional[ToolBlock]:
 
     params = {}
     if args_str:
-        import ast
         try:
             tree = ast.parse(f"dummy({args_str})")
             call_node = None
@@ -1384,15 +1405,15 @@ def _parse_qwen_tool_call(tool_name: str, args_str: str) -> Optional[ToolBlock]:
                             try:
                                 params[pos_names[idx]] = ast.literal_eval(arg_val)
                             except Exception:
-                                pass
+                                logger.warning(f"Failed to evaluate positional arg {idx} for {tool_name}: {args_str}")
+                                return None
                 # Map keyword arguments
                 for kw in call_node.keywords:
                     try:
                         params[kw.arg] = ast.literal_eval(kw.value)
                     except Exception:
-                        if is_email_tool:
-                            logger.warning(f"Failed to evaluate keyword argument {kw.arg} for email tool {tool_name}")
-                            return None
+                        logger.warning(f"Failed to evaluate keyword argument {kw.arg} for {tool_name}")
+                        return None
         except Exception:
             # If parsing failed and it's an email tool, fail closed
             if is_email_tool:
@@ -1401,9 +1422,9 @@ def _parse_qwen_tool_call(tool_name: str, args_str: str) -> Optional[ToolBlock]:
 
             params = {}
             # Fallback 1: regex key-value extraction that handles spaces and quotes
-            for m in re.finditer(r"(\w+)\s*=\s*['\"]?(.*?)['\"]?(?=\s*,\s*\w+\s*=|\s*$)", args_str):
+            for m in _QWEN_KV_RE.finditer(args_str):
                 k = m.group(1)
-                v = m.group(2).strip()
+                v = (m.group(2) or m.group(3) or m.group(4) or "").strip()
                 if v == "True":
                     v = True
                 elif v == "False":
