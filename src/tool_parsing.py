@@ -1186,6 +1186,14 @@ _BUILTIN_PRIMARY_ARG = {
     "create_document": "title",
 }
 
+# Tools whose argument is freeform text (a command, code snippet, etc.)
+# rather than structured keyword arguments. The regex KV fallback must not
+# run for these tools because '=' characters inside the freeform value would
+# be misinterpreted as keyword separators (e.g. `bash(echo x=y)` would
+# wrongly extract {"x": "y"} instead of treating the whole string as a
+# single command).
+_FREEFORM_ARG_TOOLS = frozenset({"bash", "python"})
+
 
 def _scan_qwen_args(text: str, start_pos: int) -> Optional[Tuple[str, int]]:
     """
@@ -1214,7 +1222,7 @@ def _scan_qwen_args(text: str, start_pos: int) -> Optional[Tuple[str, int]]:
             if char in ('"', "'"):
                 # Detect triple-quoted strings
                 if pos + 2 < n and text[pos + 1] == char and text[pos + 2] == char:
-                    triple = char
+                    triple = char * 3
                     pos += 3
                     while pos < n:
                         if text[pos] == '\\':
@@ -1400,13 +1408,18 @@ def _parse_qwen_tool_call(tool_name: str, args_str: str) -> Optional[ToolBlock]:
                 # Map positional arguments if we know the tool's signature
                 pos_names = _BUILTIN_POSITIONAL_ARGS.get(canonical_name)
                 if pos_names:
+                    if len(call_node.args) > len(pos_names):
+                        logger.warning(
+                            f"Too many positional args for {tool_name} "
+                            f"(expected {len(pos_names)}, got {len(call_node.args)}): {args_str}"
+                        )
+                        return None
                     for idx, arg_val in enumerate(call_node.args):
-                        if idx < len(pos_names):
-                            try:
-                                params[pos_names[idx]] = ast.literal_eval(arg_val)
-                            except Exception:
-                                logger.warning(f"Failed to evaluate positional arg {idx} for {tool_name}: {args_str}")
-                                return None
+                        try:
+                            params[pos_names[idx]] = ast.literal_eval(arg_val)
+                        except Exception:
+                            logger.warning(f"Failed to evaluate positional arg {idx} for {tool_name}: {args_str}")
+                            return None
                 # Map keyword arguments
                 for kw in call_node.keywords:
                     try:
@@ -1421,25 +1434,28 @@ def _parse_qwen_tool_call(tool_name: str, args_str: str) -> Optional[ToolBlock]:
                 return None
 
             params = {}
-            # Fallback 1: regex key-value extraction that handles spaces and quotes
-            for m in _QWEN_KV_RE.finditer(args_str):
-                k = m.group(1)
-                v = (m.group(2) or m.group(3) or m.group(4) or "").strip()
-                if v == "True":
-                    v = True
-                elif v == "False":
-                    v = False
-                elif v == "None":
-                    v = None
-                else:
-                    try:
-                        if "." in v:
-                            v = float(v)
-                        else:
-                            v = int(v)
-                    except ValueError:
-                        pass
-                params[k] = v
+            # Fallback 1: regex key-value extraction that handles spaces and quotes.
+            # Skip for freeform-arg tools (bash, python) where '=' in the command
+            # string would be misinterpreted as a keyword separator.
+            if canonical_name not in _FREEFORM_ARG_TOOLS:
+                for m in _QWEN_KV_RE.finditer(args_str):
+                    k = m.group(1)
+                    v = (m.group(2) or m.group(3) or m.group(4) or "").strip()
+                    if v == "True":
+                        v = True
+                    elif v == "False":
+                        v = False
+                    elif v == "None":
+                        v = None
+                    else:
+                        try:
+                            if "." in v:
+                                v = float(v)
+                            else:
+                                v = int(v)
+                        except ValueError:
+                            pass
+                    params[k] = v
 
             # Fallback 2: single argument fallback if no key-value pairs matched
             if not params:
